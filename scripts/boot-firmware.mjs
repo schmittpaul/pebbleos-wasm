@@ -32,6 +32,7 @@ const opts = {
   settle: Number(arg('settle', 45000)) || 45000,
   boot: Number(arg('boot', 240000)) || 240000,
   out: String(arg('out', 'fw-boot.png')),
+  eink: !!arg('eink'),
   press: arg('press') === true ? '' : String(arg('press', '')),
   hold: Number(arg('hold', 250)) || 250,
 };
@@ -54,7 +55,8 @@ page.on('pageerror', (e) => console.error('  [page error]', e.message));
 
 const out = path.resolve(ROOT, opts.out);
 try {
-  const url = `http://localhost:${PORT}/?board=${opts.board}&fw=${opts.fw}`;
+  const url = `http://localhost:${PORT}/?board=${opts.board}&fw=${opts.fw}` +
+              (opts.eink ? '&eink=1' : '');
   console.log(`booting ${url}`);
   await page.goto(url, { timeout: 60_000 });
   await page.waitForFunction(() => !!window.__emu, null,
