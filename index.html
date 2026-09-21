@@ -346,15 +346,23 @@
       refreshMs: 220,     // partial refresh period
       ghost: 0.18,        // fraction of the displayed value left behind
       fullEvery: 14,      // partial refreshes between full-refresh flashes
+      // Measured on emery: stepping the selection changes ~0.040 of the
+      // screen, a menu-to-detail page turn ~0.081, opening the menu ~0.15,
+      // launching an app ~0.7 and up. 0.06 sits in the gap with margin on
+      // both sides. window.__eink.history() dumps the fractions to re-tune.
+      fullOnChange: 0.06, // fraction of the screen that counts as a page turn
       flashFrames: 2,     // refreshes the inverted flash is held for
       paper: [0xDA, 0xD8, 0xD0],
       ink:   [0x2A, 0x2C, 0x2E],
     };
     var einkPal = null;     // 256 -> packed ABGR of the paper/ink ramp
     var einkShown = null;   // last displayed level per pixel, 0..255
+    var einkLuma = null;    // scratch: this frame's luma per pixel
+    var einkWhite = 0;      // running white point of the source framebuffer
     var einkLast = 0;       // timestamp of the last committed refresh
     var einkCount = 0;      // partial refreshes since the last flash
     var einkFlash = 0;      // inverted flash refreshes still to paint
+    var einkHistory = [];   // changed-pixel fraction per partial refresh
     var forceRedraw = false;
 
     function einkBuildPalette() {
@@ -374,23 +382,41 @@
         einkShown = new Uint8Array(n);
         einkShown.fill(255);
       }
+      if (!einkLuma || einkLuma.length !== n) einkLuma = new Uint8Array(n);
       var d32 = new Uint32Array(img.data.buffer);
       var steps = EINK.levels - 1;
       var ghost = EINK.ghost;
       var flashing = einkFlash > 0;
 
+      // The guest's white is not 0xFF: the display model renders the panel's
+      // reflectance, so emery's white lands near 100. Quantizing absolute
+      // luma would pin every frame to the bottom of the ramp, so normalize
+      // against the brightest pixel on screen. The white point decays slowly
+      // rather than tracking each frame, so a briefly dark screen is not
+      // stretched back to full contrast.
+      var changed = 0;
+      var frameMax = 0;
       for (var i = 0; i < n; i++) {
         var px = d32[i];
         // Rec.601 luma from the RGBA the blit just wrote.
         var lum = ((px & 0xFF) * 77 + ((px >> 8) & 0xFF) * 150 +
                    ((px >> 16) & 0xFF) * 29) >> 8;
-        var target = Math.round(lum * steps / 255) * 255 / steps;
+        einkLuma[i] = lum;
+        if (lum > frameMax) frameMax = lum;
+      }
+      einkWhite = Math.max(frameMax, einkWhite * 0.98, 1);
+
+      for (var i = 0; i < n; i++) {
+        var lum = einkLuma[i];
+        var norm = lum >= einkWhite ? 255 : (lum * 255 / einkWhite);
+        var target = Math.round(norm * steps / 255) * 255 / steps;
         if (flashing) {
           // The flash drives every pixel to its opposite, which is both what
           // it looks like and why it leaves no residue to carry forward.
           einkShown[i] = target;
           d32[i] = einkPal[255 - target];
         } else {
+          if (target > einkShown[i] + 48 || target < einkShown[i] - 48) changed++;
           var shown = target + (einkShown[i] - target) * ghost;
           einkShown[i] = shown;
           d32[i] = einkPal[shown | 0];
@@ -400,7 +426,17 @@
       if (flashing) {
         --einkFlash;
         forceRedraw = true;
-      } else if (++einkCount >= EINK.fullEvery) {
+        return;
+      }
+
+      einkHistory.push(+(changed / n).toFixed(4));
+      if (einkHistory.length > 400) einkHistory.shift();
+
+      // A page turn gets a full refresh, the way a real controller handles
+      // one: stepping the selection is a partial update and keeps its
+      // ghosting, but swapping the whole screen clears the panel instead of
+      // leaving the previous screen legible underneath.
+      if (changed > n * EINK.fullOnChange || ++einkCount >= EINK.fullEvery) {
         einkCount = 0;
         einkFlash = EINK.flashFrames;
         forceRedraw = true;
@@ -409,6 +445,7 @@
 
     function einkReset() {
       einkShown = null;
+      einkWhite = 0;
       einkCount = 0;
       einkFlash = 0;
       einkLast = 0;
@@ -476,7 +513,8 @@
       }
       einkBox.addEventListener('change', function () { setEink(einkBox.checked); });
       if (params.get('eink') === '1') setEink(true);
-      window.__eink = { set: setEink, opts: EINK };
+      window.__eink = { set: setEink, opts: EINK,
+                        history: () => einkHistory.slice() };
     })();
 
     // FPS: guest frames blitted, 3-second window

@@ -41,6 +41,21 @@ forking PebbleOS, which is a separate piece of work.
 The menu closes itself after 8 seconds of no input, so an idle watch settles
 back to the face instead of holding a menu on the panel.
 
+## What e-ink changed about the interaction
+
+Two things fell out of running it, not out of designing it:
+
+* **Auto-repeat has to be slower than the panel.** At a 220 ms partial
+  refresh, the original 250 ms repeat gave each step barely one refresh —
+  a spin was illegible, and an ordinary deliberate press registered twice
+  and overshot the item you meant. `REPEAT_MS` is now 400 ms, comfortably
+  above the refresh period. On an LCD this would just feel slightly slow;
+  here it is the difference between a usable menu and an unusable one.
+* **A page turn needs a full refresh.** Pushing the detail screen over the
+  menu left the whole dial legible underneath as ghosting. The host now
+  flashes the panel when enough of the screen changes at once, which is
+  what a real controller does on a page turn.
+
 ## Building and running
 
 There is no Pebble SDK on this machine; `appbuild/` (clang compiled to wasm,

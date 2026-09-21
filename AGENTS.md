@@ -316,6 +316,14 @@ The firmware has no idea its panel is slow. Moving the refresh semantics
 into `pebble_display.c` so the guest actually sees them is the obvious next
 step, and needs a wasm rebuild.
 
+A full refresh also fires when enough of the screen changes at once, so a
+page turn clears rather than leaving the previous screen ghosted underneath.
+The threshold is measured, not guessed — on emery, stepping the selection
+changes ~0.040 of the screen, a menu-to-detail page turn ~0.081, opening the
+menu ~0.15, and launching an app ~0.7 and up, so `fullOnChange` sits at 0.06.
+`window.__eink.history()` dumps the per-refresh fractions to re-tune it, and
+`dev-app.mjs --eink` prints the top ones at the end of a run.
+
 Toggle: the **E-ink** checkbox, `?eink=1`, or `window.__eink.set(true)`.
 Tunables live on `window.__eink.opts`.
 
@@ -344,4 +352,8 @@ node scripts/dev-app.mjs --app apps/radial-eink --board emery --eink \
   --press select --crown 3 --out /tmp/radial.png
 ```
 
-Requires `npm install` and `npx playwright install chromium` once.
+Requires `npm install` once. `npx playwright install chromium` stalls on
+this machine, so the driver falls back to an installed Chrome
+(`channel: 'chrome'`) with a throwaway profile; `--browser` overrides the
+choice and `--hold <ms>` sets the press duration (250 ms by default, short
+enough to stay under the app's auto-repeat).

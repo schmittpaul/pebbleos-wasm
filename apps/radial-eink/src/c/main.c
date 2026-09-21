@@ -198,11 +198,16 @@ static void back_click(ClickRecognizerRef recognizer, void *context) {
   window_stack_pop_all(false);
 }
 
+// Auto-repeat is deliberately slower than the panel's partial refresh
+// (~220 ms): a faster repeat both makes a spin illegible and turns an
+// ordinary deliberate press into two steps, overshooting the item you meant.
+#define REPEAT_MS 400
+
 static void click_config(void *context) {
   // Repeating subscriptions cover the single click too, and let a held
   // button (or a fast crown spin) walk the dial at a rate e-ink can follow.
-  window_single_repeating_click_subscribe(BUTTON_ID_UP, 250, up_click);
-  window_single_repeating_click_subscribe(BUTTON_ID_DOWN, 250, down_click);
+  window_single_repeating_click_subscribe(BUTTON_ID_UP, REPEAT_MS, up_click);
+  window_single_repeating_click_subscribe(BUTTON_ID_DOWN, REPEAT_MS, down_click);
   window_single_click_subscribe(BUTTON_ID_SELECT, select_click);
   window_single_click_subscribe(BUTTON_ID_BACK, back_click);
 }

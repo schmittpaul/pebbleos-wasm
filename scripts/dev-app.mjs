@@ -42,6 +42,8 @@ const opts = {
   press: arg('press') === true ? '' : String(arg('press', '')),
   crown: Number(arg('crown', 0)) || 0,
   out: String(arg('out', 'apps/radial-eink/shot.png')),
+  browser: String(arg('browser', 'auto')),  // auto | chromium | chrome
+  holdMs: Number(arg('hold', 250)) || 250,
 };
 
 // Zip the project the way the build worker expects a repo zip: everything
@@ -74,12 +76,22 @@ async function main() {
 
   const zipBuf = await zipProject(path.join(ROOT, opts.app));
 
-  // channel:'chromium' keeps the full browser build in headless mode;
-  // the default headless path wants a separate chrome-headless-shell
-  // download that `playwright install chromium` does not provide.
+  // Prefer Playwright's own chromium, but fall back to an installed Chrome
+  // rather than blocking on a ~170 MB download. Either way the profile is a
+  // throwaway temp dir, so the user's real Chrome session is untouched.
+  // channel:'chromium' keeps the full build in headless mode; the default
+  // headless path wants a chrome-headless-shell download that
+  // `playwright install chromium` does not provide.
+  const bundled = (() => {
+    try { return fs.existsSync(chromium.executablePath()); } catch (e) { return false; }
+  })();
+  const channel = opts.browser !== 'auto' ? opts.browser
+                : bundled ? (opts.headless ? 'chromium' : undefined)
+                : 'chrome';
+  console.log(`browser: ${channel || 'bundled chromium'}`);
   const browser = await chromium.launch({
     headless: opts.headless,
-    channel: opts.headless ? 'chromium' : undefined,
+    channel,
     args: ['--enable-features=SharedArrayBuffer'],
   });
   const page = await (await browser.newContext()).newPage();
@@ -123,7 +135,9 @@ async function main() {
     for (const name of opts.press.split(',').map((s) => s.trim()).filter(Boolean)) {
       console.log(`press ${name}`);
       await page.evaluate((n) => window.__emu.pressButton(n, true), name);
-      await page.waitForTimeout(600);
+      // Short enough to stay under the app's auto-repeat interval, so one
+      // --press is one step; the guest polls buttons every 16 ms.
+      await page.waitForTimeout(opts.holdMs);
       await page.evaluate((n) => window.__emu.pressButton(n, false), name);
       await page.waitForTimeout(1500);
     }
@@ -132,6 +146,15 @@ async function main() {
       console.log(`crown ${opts.crown} detents`);
       await page.evaluate((n) => window.__crown.turn(n), opts.crown);
       await page.waitForTimeout(1000 + Math.abs(opts.crown) * 400);
+    }
+
+    if (opts.eink) {
+      // Changed-pixel fraction per partial refresh: the basis for choosing
+      // the page-turn threshold rather than guessing it.
+      const hist = await page.evaluate(() => window.__eink.history());
+      const big = hist.filter((f) => f > 0.005).sort((a, b) => b - a);
+      console.log(`eink refreshes: ${hist.length}, ` +
+                  `top changed fractions: ${big.slice(0, 12).join(' ')}`);
     }
 
     const out = path.resolve(ROOT, opts.out);
