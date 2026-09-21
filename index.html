@@ -344,7 +344,13 @@
       on: false,
       levels: 4,          // 4-level grayscale, as on a typical e-paper panel
       refreshMs: 220,     // partial refresh period
-      ghost: 0.18,        // fraction of the displayed value left behind
+      // Fraction of the displayed value left behind. Calibrated against the
+      // launcher: at 0.18 one selection step left the previous app name
+      // legible through the new one ("SMusic s"), which a real panel's
+      // partial refresh does not do — a menu has to stay readable between
+      // full refreshes. At 0.10 text survives a step and residue is still
+      // plainly visible on solid shapes.
+      ghost: 0.10,
       fullEvery: 14,      // partial refreshes between full-refresh flashes
       // Measured on emery: stepping the selection changes ~0.040 of the
       // screen, a menu-to-detail page turn ~0.081, opening the menu ~0.15,
