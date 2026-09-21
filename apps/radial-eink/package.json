@@ -1,0 +1,22 @@
+{
+  "name": "radial-eink",
+  "version": "1.0.0",
+  "private": true,
+  "author": "Paul Schmitt",
+  "keywords": ["pebble-app"],
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Radial",
+    "uuid": "1f98510d-fbd2-47cf-af90-700a1ccc79ac",
+    "sdkVersion": "3",
+    "enableMultiJS": false,
+    "targetPlatforms": ["emery", "flint", "gabbro"],
+    "watchapp": {
+      "watchface": false,
+      "hiddenApp": false,
+      "onlyShownOnCommunication": false
+    },
+    "messageKeys": [],
+    "resources": { "media": [] }
+  }
+}

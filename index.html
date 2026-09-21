@@ -50,6 +50,17 @@
       background: #000; border: 2px solid #333; border-radius: 10px;
       padding: 10px; margin-bottom: 12px;
     }
+    /* The watch has no crown; this is the proposed one. Dragging or
+       scrolling it emits detents that the host turns into Up/Down. */
+    #screen-row { display: flex; align-items: center; gap: 10px; }
+    #crown {
+      width: 22px; height: 92px; border-radius: 11px; cursor: ns-resize;
+      background: repeating-linear-gradient(
+        to bottom, #55556a 0 3px, #33334a 3px 6px);
+      border: 2px solid #6a6a80; touch-action: none; user-select: none;
+      margin-bottom: 12px;
+    }
+    #crown.turning { border-color: #8f8fb0; }
     canvas#canvas { display: block; image-rendering: pixelated; background: #000; }
     #buttons { display: flex; gap: 8px; margin-bottom: 6px; }
     #buttons button { padding: 8px 16px; user-select: none; touch-action: none; }
@@ -128,13 +139,19 @@
     </select>
     <button id="btn-boot" style="display:none">Boot</button>
     <button id="btn-reset" title="Wipe the saved watch storage and reload">Factory reset</button>
+    <label id="eink-label" title="Render the panel as e-paper: 4 gray levels, ghosting, slow partial refresh, periodic full-refresh flash">
+      <input type="checkbox" id="eink"> E-ink
+    </label>
   </div>
 
   <div id="status">Booting…</div>
   <div id="progress"><div id="progress-fill"></div></div>
 
   <div id="fps">FPS: --</div>
-  <div id="screen-frame"><canvas id="canvas" width="200" height="228"></canvas></div>
+  <div id="screen-row">
+    <div id="screen-frame"><canvas id="canvas" width="200" height="228"></canvas></div>
+    <div id="crown" title="Crown: drag or scroll to step around the dial"></div>
+  </div>
 
   <div id="buttons">
     <button id="btn-back" title="Back (Left / Escape)">Back</button>
@@ -142,7 +159,7 @@
     <button id="btn-select" title="Select (Right / Enter)">Select</button>
     <button id="btn-down" title="Down (Arrow Down)">Down</button>
   </div>
-  <div class="hint">Keys: &larr; Back &middot; &uarr;/&darr; Navigate &middot; &rarr;/Enter Select &middot; buttons can be held &middot; the screen is a touchscreen (click/drag)</div>
+  <div class="hint">Keys: &larr; Back &middot; &uarr;/&darr; Navigate &middot; &rarr;/Enter Select &middot; buttons can be held &middot; the screen is a touchscreen (click/drag) &middot; crown: drag the knob, scroll over it, or press <kbd>,</kbd>/<kbd>.</kbd></div>
 
   <div id="install-panel">
     <div id="install-row">
@@ -310,10 +327,106 @@
     var firstFrame = true;
     var cachedImg = null;
 
+    // ================================================================
+    // E-ink panel simulation. The guest still renders a normal
+    // framebuffer; the panel is modelled here, at the blit:
+    //   * quantize to a few gray levels on a paper-and-ink palette,
+    //   * leave a fraction of the previously displayed value behind as
+    //     ghosting, which decays over the next few refreshes,
+    //   * rate-limit to a partial-refresh period, so intermediate
+    //     frames are simply never shown, and
+    //   * every so often flash the panel inverted and clear the
+    //     accumulated residue, the way a controller's full refresh does.
+    // This constrains how the UI *looks*, not what the firmware sees —
+    // the guest has no idea its panel is slow (see README).
+    // ================================================================
+    var EINK = {
+      on: false,
+      levels: 4,          // 4-level grayscale, as on a typical e-paper panel
+      refreshMs: 220,     // partial refresh period
+      ghost: 0.18,        // fraction of the displayed value left behind
+      fullEvery: 14,      // partial refreshes between full-refresh flashes
+      flashFrames: 2,     // refreshes the inverted flash is held for
+      paper: [0xDA, 0xD8, 0xD0],
+      ink:   [0x2A, 0x2C, 0x2E],
+    };
+    var einkPal = null;     // 256 -> packed ABGR of the paper/ink ramp
+    var einkShown = null;   // last displayed level per pixel, 0..255
+    var einkLast = 0;       // timestamp of the last committed refresh
+    var einkCount = 0;      // partial refreshes since the last flash
+    var einkFlash = 0;      // inverted flash refreshes still to paint
+    var forceRedraw = false;
+
+    function einkBuildPalette() {
+      einkPal = new Uint32Array(256);
+      for (var v = 0; v < 256; v++) {
+        var r = EINK.ink[0] + (EINK.paper[0] - EINK.ink[0]) * v / 255;
+        var g = EINK.ink[1] + (EINK.paper[1] - EINK.ink[1]) * v / 255;
+        var b = EINK.ink[2] + (EINK.paper[2] - EINK.ink[2]) * v / 255;
+        einkPal[v] = (r | 0) | ((g | 0) << 8) | ((b | 0) << 16) | 0xFF000000;
+      }
+    }
+
+    function einkApply(img, w, h) {
+      if (!einkPal) einkBuildPalette();
+      var n = w * h;
+      if (!einkShown || einkShown.length !== n) {
+        einkShown = new Uint8Array(n);
+        einkShown.fill(255);
+      }
+      var d32 = new Uint32Array(img.data.buffer);
+      var steps = EINK.levels - 1;
+      var ghost = EINK.ghost;
+      var flashing = einkFlash > 0;
+
+      for (var i = 0; i < n; i++) {
+        var px = d32[i];
+        // Rec.601 luma from the RGBA the blit just wrote.
+        var lum = ((px & 0xFF) * 77 + ((px >> 8) & 0xFF) * 150 +
+                   ((px >> 16) & 0xFF) * 29) >> 8;
+        var target = Math.round(lum * steps / 255) * 255 / steps;
+        if (flashing) {
+          // The flash drives every pixel to its opposite, which is both what
+          // it looks like and why it leaves no residue to carry forward.
+          einkShown[i] = target;
+          d32[i] = einkPal[255 - target];
+        } else {
+          var shown = target + (einkShown[i] - target) * ghost;
+          einkShown[i] = shown;
+          d32[i] = einkPal[shown | 0];
+        }
+      }
+
+      if (flashing) {
+        --einkFlash;
+        forceRedraw = true;
+      } else if (++einkCount >= EINK.fullEvery) {
+        einkCount = 0;
+        einkFlash = EINK.flashFrames;
+        forceRedraw = true;
+      }
+    }
+
+    function einkReset() {
+      einkShown = null;
+      einkCount = 0;
+      einkFlash = 0;
+      einkLast = 0;
+      forceRedraw = true;
+    }
+
     function blitFrame() {
       if (!qemu) return;
       var fc = qemu._pebble_wasm_display_frame_count();
-      if (fc === lastFrameCount) return;
+      if (fc === lastFrameCount && !forceRedraw) return;
+      if (EINK.on) {
+        // The panel is still settling; drop the frame rather than queue it,
+        // which is what a real partial refresh does to intermediate frames.
+        var nowMs = performance.now();
+        if (nowMs - einkLast < EINK.refreshMs) return;
+        einkLast = nowMs;
+      }
+      forceRedraw = false;
       lastFrameCount = fc;
 
       var width = qemu._pebble_wasm_display_width();
@@ -347,10 +460,24 @@
             heap[s + 2] | (heap[s + 1] << 8) | (heap[s] << 16) | 0xFF000000;
         }
       }
+      if (EINK.on) einkApply(cachedImg, width, height);
       canvasCtx.putImageData(cachedImg, 0, 0);
       fpsFrames++;
     }
     setInterval(blitFrame, 30);
+
+    // E-ink is a display-side toggle, so it flips live without a reboot.
+    (function () {
+      var einkBox = document.getElementById('eink');
+      function setEink(on) {
+        EINK.on = !!on;
+        einkBox.checked = EINK.on;
+        einkReset();
+      }
+      einkBox.addEventListener('change', function () { setEink(einkBox.checked); });
+      if (params.get('eink') === '1') setEink(true);
+      window.__eink = { set: setEink, opts: EINK };
+    })();
 
     // FPS: guest frames blitted, 3-second window
     var fpsFrames = 0, fpsT0 = performance.now();
@@ -453,6 +580,87 @@
       el.addEventListener('pointerup', release);
       el.addEventListener('pointercancel', release);
     });
+
+    // ================================================================
+    // Crown: no Pebble ever had one, and neither does the emulated
+    // hardware, so it is synthesised here — each detent becomes one
+    // discrete Up or Down press. The app cannot tell the difference,
+    // which is the point: the radial UI is driven by hour-steps, and a
+    // crown is just a faster way to produce them. A real encoder would
+    // need a new QEMU device plus firmware support (see README).
+    // ================================================================
+    var CROWN = {
+      pixelsPerDetent: 36,   // drag/scroll distance for one hour-step
+      holdMs: 180,           // press duration; the guest polls buttons at 16 ms
+      gapMs: 70,             // release time between queued detents
+    };
+    var crownQueue = 0;      // signed: + is clockwise (Down), - is Up
+    var crownBusy = false;
+    var crownAccum = 0;
+    var crownEl = document.getElementById('crown');
+
+    // Detents are played out one at a time: two presses inside the guest's
+    // poll interval would be seen as one, so a fast spin queues rather than
+    // dropping steps.
+    function crownPump() {
+      if (crownBusy || !crownQueue) return;
+      crownBusy = true;
+      var bit = crownQueue > 0 ? BTN_DOWN : BTN_UP;
+      crownQueue -= crownQueue > 0 ? 1 : -1;
+      updateButtons(bit, true);
+      setTimeout(function () {
+        updateButtons(bit, false);
+        setTimeout(function () { crownBusy = false; crownPump(); }, CROWN.gapMs);
+      }, CROWN.holdMs);
+    }
+
+    function crownTurn(detents) {
+      if (!detents) return;
+      // Cap the backlog: spinning wildly should not leave the watch
+      // stepping for the next ten seconds.
+      crownQueue = Math.max(-8, Math.min(8, crownQueue + detents));
+      crownEl.classList.add('turning');
+      clearTimeout(crownTurn.fade);
+      crownTurn.fade = setTimeout(function () { crownEl.classList.remove('turning'); }, 250);
+      crownPump();
+    }
+
+    function crownScroll(deltaPx) {
+      crownAccum += deltaPx;
+      var n = (crownAccum / CROWN.pixelsPerDetent) | 0;
+      if (!n) return;
+      crownAccum -= n * CROWN.pixelsPerDetent;
+      crownTurn(n);
+    }
+
+    crownEl.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      crownScroll(e.deltaY);
+    }, { passive: false });
+
+    var crownDragY = null;
+    crownEl.addEventListener('pointerdown', function (e) {
+      e.preventDefault();
+      crownEl.setPointerCapture(e.pointerId);
+      crownDragY = e.clientY;
+      crownAccum = 0;
+    });
+    crownEl.addEventListener('pointermove', function (e) {
+      if (crownDragY === null) return;
+      crownScroll(e.clientY - crownDragY);
+      crownDragY = e.clientY;
+    });
+    function crownRelease() { crownDragY = null; }
+    crownEl.addEventListener('pointerup', crownRelease);
+    crownEl.addEventListener('pointercancel', crownRelease);
+
+    document.addEventListener('keydown', function (e) {
+      if (typingIntoField(e) || e.repeat) return;
+      if (e.key === ',') { e.preventDefault(); crownTurn(-1); }
+      else if (e.key === '.') { e.preventDefault(); crownTurn(1); }
+    });
+
+    window.__crown = { turn: crownTurn, opts: CROWN };
 
     // ================================================================
     // Touch: pebble_touch.c polls a shared {seq, down, x, y} struct at
@@ -1325,14 +1533,14 @@
       else console.log('[build] ' + msg);
     };
 
-    async function buildFromRepo() {
-      const text = buildInput.value.trim();
-      if (!text) { say('Paste a GitHub repo URL first.'); return; }
-      const zipUrls = repoZipCandidates(text);
-      if (!zipUrls) { say('That does not look like a GitHub repo (or .zip) URL.'); return; }
+    // One build path for two sources: a GitHub repo the page fetches itself,
+    // and a local project zip handed straight to the worker (see
+    // tools/dev/dev-build.mjs). Rethrows so a driver can await the result;
+    // buildFromRepo keeps the old fire-and-forget behaviour for the button.
+    async function runBuild(payload, label) {
       if (building) { say('A build is already running.'); return; }
       building = true; buildBtn.disabled = true;
-      say(`Building from ${text} for ${boardSel.value}… `
+      say(`Building ${label} for ${boardSel.value}\u2026 `
             + '(the first build downloads the toolchain once)');
       try {
         const pbw = await new Promise((resolve, reject) => {
@@ -1347,24 +1555,34 @@
             else if (d.type === 'error') reject(new Error(d.msg));
           };
           buildWorker.onerror = (e) => reject(new Error('build worker failed: ' + e.message));
-          buildWorker.postMessage({
-            cmd: 'build', zipUrls, platform: boardSel.value, proxy: PKJS_PROXY,
+          buildWorker.postMessage(Object.assign({
+            cmd: 'build', platform: boardSel.value, proxy: PKJS_PROXY,
             // bundle the other boards the app targets, like the SDK does
             alsoPlatforms: ['emery', 'flint', 'gabbro', 'aplite', 'basalt', 'chalk', 'diorite'],
-          });
+          }, payload));
         });
         // The build saturates every core, which starves the emulator; give
         // it a moment to catch up or the install times out mid-handshake.
-        say('Built ' + pbw.name + ' (' + (pbw.bytes.length >> 10) + ' KB) — installing…');
+        say('Built ' + pbw.name + ' (' + (pbw.bytes.length >> 10) + ' KB) \u2014 installing\u2026');
         await new Promise((r) => setTimeout(r, 2500));
         await installBytes(pbw.bytes, pbw.name);
+        return pbw.name;
       } catch (e) {
         say('Build failed: ' + e.message);
         buildLog('build failed: ' + e.message);
         console.error(e);
+        throw e;
       } finally {
         building = false; buildBtn.disabled = false;
       }
+    }
+
+    async function buildFromRepo() {
+      const text = buildInput.value.trim();
+      if (!text) { say('Paste a GitHub repo URL first.'); return; }
+      const zipUrls = repoZipCandidates(text);
+      if (!zipUrls) { say('That does not look like a GitHub repo (or .zip) URL.'); return; }
+      return runBuild({ zipUrls }, 'from ' + text).catch(() => {});
     }
 
     buildBtn.addEventListener('click', buildFromRepo);
@@ -1374,6 +1592,8 @@
     window.__installPbw = installBytes;
     window.__openConfig = openConfigUrl;
     window.__buildRepo = (url) => { buildInput.value = url; return buildFromRepo(); };
+    window.__buildZip = (bytes) => runBuild(
+      { zipBytes: bytes instanceof Uint8Array ? bytes.buffer : bytes }, 'local project');
 
     // Drag-drop a .pbw anywhere on the page.
     document.addEventListener('dragover', (e) => {

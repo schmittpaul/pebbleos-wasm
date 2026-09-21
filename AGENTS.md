@@ -292,3 +292,56 @@ Rebuild with additional `-extra-cflags`:
 -DDEBUG_STM32_UART     # UART
 -DDEBUG_GIC            # Interrupt controller
 ```
+
+## Radial / e-ink experiment
+
+An exploration of a Pebble reimagined as an e-paper watch with an analog
+face whose menu items sit at hour positions instead of in a vertical list.
+Three pieces, deliberately kept independent:
+
+### 1. The app — `apps/radial-eink/`
+
+A Pebble watchapp (not a watchface: watchfaces get no button events). See
+its README for the interaction model. Built only by `appbuild/`; there is no
+local Pebble SDK or `arm-none-eabi-gcc` on this machine.
+
+### 2. E-ink panel simulation — `index.html`
+
+Modelled at the blit (`einkApply`), not in the guest: four gray levels on a
+paper/ink palette, ghosting that decays over the next few refreshes, a
+220 ms partial-refresh period that simply drops intermediate frames, and a
+periodic inverted full-refresh flash that clears the residue.
+
+The firmware has no idea its panel is slow. Moving the refresh semantics
+into `pebble_display.c` so the guest actually sees them is the obvious next
+step, and needs a wasm rebuild.
+
+Toggle: the **E-ink** checkbox, `?eink=1`, or `window.__eink.set(true)`.
+Tunables live on `window.__eink.opts`.
+
+### 3. Crown input — `index.html`
+
+No Pebble has a crown and neither does the emulated hardware, so detents are
+synthesised into discrete Up/Down presses (`crownTurn`). Because the guest
+polls the button mask on a 16 ms interval, detents are played out one at a
+time — press, hold `CROWN.holdMs`, release, gap — rather than fired
+concurrently, so a fast spin queues instead of dropping steps.
+
+Drag or scroll the knob beside the screen, press `,` / `.`, or call
+`window.__crown.turn(n)`. Tunables on `window.__crown.opts`.
+
+A real rotary encoder would mean a new QEMU device in the generic board plus
+firmware support for it — worth doing only if the interaction proves out.
+
+### Dev loop
+
+`scripts/dev-app.mjs` zips a local app project, boots the page under
+Playwright, hands the zip to the build worker via `window.__buildZip`
+(added alongside the existing `__buildRepo`), installs and screenshots:
+
+```sh
+node scripts/dev-app.mjs --app apps/radial-eink --board emery --eink \
+  --press select --crown 3 --out /tmp/radial.png
+```
+
+Requires `npm install` and `npx playwright install chromium` once.
