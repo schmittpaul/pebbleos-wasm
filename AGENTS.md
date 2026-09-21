@@ -357,3 +357,75 @@ this machine, so the driver falls back to an installed Chrome
 (`channel: 'chrome'`) with a throwaway profile; `--browser` overrides the
 choice and `--hold <ms>` sets the press duration (250 ms by default, short
 enough to stay under the app's auto-repeat).
+
+
+## Building PebbleOS firmware
+
+The radial UI is moving from a watchapp into the system launcher, which means
+building firmware. PebbleOS is CMake + Kconfig (not waf) and has first-class
+`qemu_emery`, `qemu_flint` and `qemu_gabbro` board targets — the same boards
+this emulator runs. A full build is ~25 s.
+
+### One-time setup
+
+```sh
+git clone https://github.com/coredevices/PebbleOS.git ~/dev/PebbleOS
+cd ~/dev/PebbleOS
+git submodule update --init --recursive --depth 1
+brew install python freetype gettext llvm cmake lcov ninja node librsvg
+python3.14 -m venv .venv && .venv/bin/pip install -r requirements.txt
+```
+
+The toolchain comes from the PebbleOS SDK bundle (ARM GCC 14.2.rel1 —
+Homebrew's 16.x is too new — plus QEMU 10.1.5-pebble17), installed at
+`~/pebbleos-sdk-<version>`. Its documented installer is `curl | sh`; the
+equivalent is to download the release bundle, check its sha256, and extract
+each component named in the bundle's `manifest.sh` with `tar`.
+
+Two traps, both of which cost a configure cycle:
+
+- **The venv must be activated, not just on `PATH`.** CMake's `FindPython3`
+  picks the Homebrew interpreter otherwise, and `kconfiglib` is not there.
+  `. .venv/bin/activate` sets `VIRTUAL_ENV`, which is what CMake keys on.
+- **Submodules are required** (`third_party/cmsis_core` and friends), so a
+  bare `--depth 1` clone fails at configure.
+
+### Build
+
+```sh
+cd ~/dev/PebbleOS
+. ~/pebbleos-sdk-0.1.8/env.sh
+. .venv/bin/activate
+pbl configure --board=qemu_emery
+pbl build
+cmake --build build --target qemu_image_micro qemu_image_spi
+```
+
+`pbl build` alone does not produce the flash images; those two targets do.
+
+### Running it here
+
+The images land at `build/qemu_{micro,spi}_flash.bin` — exactly what this
+emulator loads. Copy them into `firmware/<name>/` and boot with `?fw=<name>`,
+which runs a custom firmware on a stock machine without inventing a board for
+it. Saved watch storage is keyed on the same name, so a rebuilt firmware does
+not boot into an image the previous one wrote.
+
+```sh
+mkdir -p firmware/pebbleos-dev
+cp ~/dev/PebbleOS/build/qemu_{micro,spi}_flash.bin firmware/pebbleos-dev/
+node scripts/boot-firmware.mjs --fw pebbleos-dev --press select --out /tmp/fw.png
+```
+
+`firmware/pebbleos-dev/` is gitignored (35 MB, reproducible).
+
+### The launcher
+
+`src/fw/apps/system/launcher/default/` — `launcher.c` is a 200-line shell and
+the list UI is 474 lines in `menu_layer.c` behind a `launcher_menu_layer_*`
+API, so a radial launcher replaces one file. The app list comes from
+`app_menu_data_source_get_count()` / `_get_node_at_index()`, and launching is:
+
+```c
+app_manager_put_launch_app_event(&(AppLaunchEventConfig){ .id = node->install_id, ... });
+```

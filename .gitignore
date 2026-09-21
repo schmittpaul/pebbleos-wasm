@@ -7,3 +7,6 @@ build/
 node_modules/
 .playwright-mcp/
 htdocs/
+
+# Locally built PebbleOS firmware (35 MB, rebuild with pbl)
+firmware/pebbleos-dev/

@@ -851,6 +851,13 @@
     // OPFS every 15 s when dirty and restored on the next boot, so the
     // watch survives page reloads. Factory reset deletes it.
     // ================================================================
+    // ?fw=<dir> boots a firmware built elsewhere (e.g. a PebbleOS tree) on
+    // the selected machine, without inventing a board for it. Saved watch
+    // storage is keyed on the same name, so a custom firmware keeps its own
+    // storage instead of inheriting the stock board's — which also means a
+    // rebuilt firmware does not boot into an image the old one wrote.
+    function firmwareName() { return params.get('fw') || boardSel.value; }
+
     function spiFileName(boardName) { return 'spi-' + boardName + '.bin'; }
 
     async function loadSavedSpi(boardName) {
@@ -899,7 +906,7 @@
       if (!confirm('Wipe the saved watch storage (installed apps, settings) and reload?')) return;
       try {
         var root = await navigator.storage.getDirectory();
-        await root.removeEntry(spiFileName(boardSel.value));
+        await root.removeEntry(spiFileName(firmwareName()));
       } catch (e) { /* nothing saved */ }
       try {
         Object.keys(window.localStorage)
@@ -956,16 +963,17 @@
       canvas.width = board.width;
       canvas.height = board.height;
 
+      var fwName = firmwareName();
       try {
-        setStatus('Fetching micro flash (' + name + ')...');
-        var micro = await fetchWithProgress('firmware/' + name + '/qemu_micro_flash.bin', 'Micro flash');
-        var spi = await loadSavedSpi(name);
+        setStatus('Fetching micro flash (' + fwName + ')...');
+        var micro = await fetchWithProgress('firmware/' + fwName + '/qemu_micro_flash.bin', 'Micro flash');
+        var spi = await loadSavedSpi(fwName);
         if (spi) {
           setStatus('Restored saved watch storage (installed apps kept)');
           spiDirtyHash = quickHash(spi);
         } else {
           setStatus('Fetching SPI flash (32 MB)...');
-          spi = await fetchWithProgress('firmware/' + name + '/qemu_spi_flash.bin', 'SPI flash');
+          spi = await fetchWithProgress('firmware/' + fwName + '/qemu_spi_flash.bin', 'SPI flash');
         }
 
         setStatus('Loading QEMU WASM module...');
@@ -994,7 +1002,7 @@
           locateFile: function (p) { return qemuDir + p + '?v=' + WASM_VER; },
         };
         qemu = await factory(cfg);
-        setInterval(function () { persistSpi(name); }, 15000);
+        setInterval(function () { persistSpi(fwName); }, 15000);
         // Diagnostics, from the devtools console or a headless soak run:
         // what the emulator is holding on to while it runs.
         window.__qemuStats = function () {
