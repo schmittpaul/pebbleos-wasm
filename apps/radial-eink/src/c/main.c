@@ -14,6 +14,12 @@
 typedef struct {
   const char *name;
   const char *detail;
+  // The system app to launch, or NULL to show the in-app detail screen.
+  // The SDK gives a watchapp no way to start another app, so the UUID goes
+  // to the phone over AppMessage and it makes the call (see the launch
+  // bridge in index.html). Launching replaces this app, which is what a
+  // launcher should do.
+  const char *uuid;
 } MenuItem;
 
 // Slot n of the dial is item n, so the order here is the clock order.
@@ -147,6 +153,19 @@ static void detail_layer_update(Layer *layer, GContext *ctx) {
 
 // ------------------------------------------------------------------ input
 
+static void launch_uuid(const char *uuid) {
+  DictionaryIterator *out;
+  const AppMessageResult r = app_message_outbox_begin(&out);
+  if (r != APP_MSG_OK) {
+    APP_LOG(APP_LOG_LEVEL_ERROR, "outbox_begin failed: %d", r);
+    return;
+  }
+  dict_write_cstring(out, MESSAGE_KEY_LAUNCH_UUID, uuid);
+  app_message_outbox_send();
+}
+
+// ------------------------------------------------------------------------
+
 static void close_menu(void *unused) {
   s_idle_timer = NULL;
   if (!s_menu_open) return;
@@ -186,7 +205,11 @@ static void select_click(ClickRecognizerRef recognizer, void *context) {
   // Hold the menu while the detail screen is up: coming back to a dial that
   // timed out underneath you loses your place for no reason.
   if (s_idle_timer) { app_timer_cancel(s_idle_timer); s_idle_timer = NULL; }
-  window_stack_push(s_detail_window, false);
+  if (s_items[s_selected].uuid) {
+    launch_uuid(s_items[s_selected].uuid);
+  } else {
+    window_stack_push(s_detail_window, false);
+  }
 }
 
 static void back_click(ClickRecognizerRef recognizer, void *context) {
@@ -226,6 +249,9 @@ static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
 
 static void init(void) {
   refresh_time();
+  // Outbox only: the launch request is one short string and nothing comes
+  // back — the reply is the system app taking over the screen.
+  app_message_open(64, 128);
 
   s_window = window_create();
   window_set_background_color(s_window, GColorWhite);

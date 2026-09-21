@@ -1196,6 +1196,27 @@
       };
       installer = new AppInstaller(phone, onProgress, (m) => say(m));
       const am = new AppMessageClient(phone, jsLog);
+
+      // Launch bridge. The Pebble SDK gives a watchapp no way to start
+      // another app, but the *phone* can: endpoint 0x34 with a UUID is the
+      // same call app-install.js makes to launch a freshly installed app.
+      // So an app that wants to act as a launcher sends us the target UUID
+      // and we make the call on its behalf. Launching replaces the running
+      // app, which is exactly what a launcher should do.
+      const LAUNCH_KEY = 10000;   // messageKeys are numbered from 10000
+      am.onAnyPush = ({ uuidHex, payload }) => {
+        // The key arrives numeric when no PebbleKit JS is registered for the
+        // sending app, and by name when one is, so accept either.
+        const target = payload[LAUNCH_KEY] ?? payload.LAUNCH_UUID;
+        if (typeof target !== 'string' || !/^[0-9a-f-]{32,36}$/i.test(target)) return;
+        const bytes = target.replace(/-/g, '').match(/../g).map((x) => parseInt(x, 16));
+        if (bytes.length !== 16) return;
+        const run = new Uint8Array(17);
+        run[0] = 0x01;
+        run.set(Uint8Array.from(bytes), 1);
+        phone.sendPP(0x0034, run);
+        jsLog(`launch bridge: ${uuidHex.slice(0, 8)}… asked to start ${target}`);
+      };
       pkjs = new PkjsRuntime(phone, am, {
         createSandbox: makeIframeSandbox(PKJS_PROXY, jsLog, PKJS_LOC),
         storage: scopedStorage,

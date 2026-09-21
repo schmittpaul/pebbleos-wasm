@@ -98,6 +98,11 @@ export class AppMessageClient {
     this.txid = 1;
     this.pending = null;   // {txid, resolve, reject, timer}
     this.onPush = null;    // (payloadObj) => void
+    // Every inbound push, whatever app it came from and whether or not any
+    // PebbleKit JS is attached. The phone itself acts on some messages
+    // (see the launch bridge in index.html), which onPush cannot see
+    // because it is owned by the running app's JS.
+    this.onAnyPush = null; // ({uuidHex, payload}) => void
     // Pushes that arrive before the app's JS has attached its handler
     // (the watch sends at app launch, we start JS on the run-state
     // notification a beat later). Drained by drainPushes().
@@ -135,6 +140,14 @@ export class AppMessageClient {
       // Always ACK; the JS side has no notion of refusing a push.
       this.phone.sendPP(EP_APP_MESSAGE, new Uint8Array([CMD_ACK, txid]));
       const entries = decodeDict(p.subarray(18));
+      if (this.onAnyPush) {
+        const uuidHex = [...p.subarray(2, 18)].map((b) => b.toString(16).padStart(2, '0')).join('');
+        try {
+          this.onAnyPush({ uuidHex, payload: this._payload(entries) });
+        } catch (e) {
+          this.log(`appmessage: onAnyPush threw: ${e.message}`);
+        }
+      }
       if (this.onPush) {
         this.onPush(this._payload(entries));
       } else {
