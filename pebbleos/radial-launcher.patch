@@ -1,0 +1,637 @@
+From 8c3b95f73c6d2386dce90bac4d8541389e6a9617 Mon Sep 17 00:00:00 2001
+From: Paul Schmitt <paul.schmitt@gmail.com>
+Date: Mon, 21 Sep 2026 16:34:58 -0700
+Subject: [PATCH 1/2] launcher: lay the app list out on a clock face
+
+The first app sits at the 12 o'clock position, the second at 1 o'clock and
+so on clockwise; Up and Down step by one hour position. Every app keeps a
+fixed, memorable place on the dial rather than one that depends on how far
+you have scrolled, and one step is exactly one crown detent.
+
+Behind CONFIG_LAUNCHER_RADIAL, so the stock list launcher stays buildable
+and the two can be compared. radial_menu_layer.c implements the same
+launcher_menu_layer_* API, so launcher.c is untouched and shared; the
+launcher sources are globbed, so menu_layer.c is guarded to compile only
+when the option is off.
+
+Drawing is flat black on white with no animation, aimed at a panel that
+redraws slowly, where a moving selection costs a refresh. There are no app
+glances for the same reason. Details that came out of running it:
+
+- No tick marks. The app dots already mark the hour positions, so ticks
+  were clutter and another thing to redraw.
+- The centre label steps down through font sizes and then ellipsizes,
+  rather than wrapping. Word-wrap broke a long name mid-syllable
+  ("Notification-s").
+- Auto-repeat is 400 ms, slower than a slow panel's refresh. A faster
+  repeat turns one deliberate press into two steps and overshoots the app
+  you meant.
+- Apps past the first twelve wrap onto an inner ring instead of piling
+  onto the outer one.
+
+Firmware is slightly smaller than with the list launcher (1798232 vs
+1807000 bytes) since the MenuLayer machinery drops out.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ src/fw/apps/Kconfig                           |  13 +
+ .../apps/system/launcher/default/menu_layer.c |   6 +
+ .../apps/system/launcher/default/menu_layer.h |  15 +
+ .../launcher/default/radial_menu_layer.c      | 352 ++++++++++++++++++
+ 4 files changed, 386 insertions(+)
+ create mode 100644 src/fw/apps/system/launcher/default/radial_menu_layer.c
+
+diff --git a/src/fw/apps/Kconfig b/src/fw/apps/Kconfig
+index dd9cb28..8a0fef2 100644
+--- a/src/fw/apps/Kconfig
++++ b/src/fw/apps/Kconfig
+@@ -6,4 +6,17 @@ menu "Applications"
+ rsource "demo/Kconfig"
+ rsource "watch/Kconfig"
+ 
++config LAUNCHER_RADIAL
++	bool "Radial launcher"
++	help
++	  Lay the launcher out on a clock face instead of in a vertical list:
++	  the first app sits at the 12 o'clock position, the second at 1
++	  o'clock and so on clockwise, with Up and Down stepping by one hour
++	  position. Every app keeps a fixed, memorable place on the dial
++	  rather than one that depends on how far you have scrolled, and the
++	  step maps directly onto a crown detent.
++
++	  Selecting this replaces the stock list launcher, including its app
++	  glances, so nothing animates behind the selection.
++
+ endmenu
+\ No newline at end of file
+diff --git a/src/fw/apps/system/launcher/default/menu_layer.c b/src/fw/apps/system/launcher/default/menu_layer.c
+index 90991c1..491dbe3 100644
+--- a/src/fw/apps/system/launcher/default/menu_layer.c
++++ b/src/fw/apps/system/launcher/default/menu_layer.c
+@@ -16,6 +16,10 @@
+ #include "pbl/kernel/compiler.h"
+ #include "pbl/util/testing.h"
+ 
++// The radial launcher in radial_menu_layer.c defines the same public API.
++// The launcher sources are globbed, so exactly one of the two must compile.
++#if !CONFIG_LAUNCHER_RADIAL
++
+ #define LAUNCHER_MENU_LAYER_CONTENT_INDICATOR_LAYER_HEIGHT (32)
+ #define LAUNCHER_MENU_LAYER_GENERIC_APP_ICON (RESOURCE_ID_MENU_LAYER_GENERIC_WATCHAPP_ICON)
+ 
+@@ -472,3 +476,5 @@ void launcher_menu_layer_deinit(LauncherMenuLayer *launcher_menu_layer) {
+ #endif
+   layer_deinit(&launcher_menu_layer->container_layer);
+ }
++
++#endif  // !CONFIG_LAUNCHER_RADIAL
+diff --git a/src/fw/apps/system/launcher/default/menu_layer.h b/src/fw/apps/system/launcher/default/menu_layer.h
+index 6b46db3..1a76d1d 100644
+--- a/src/fw/apps/system/launcher/default/menu_layer.h
++++ b/src/fw/apps/system/launcher/default/menu_layer.h
+@@ -22,6 +22,20 @@ typedef struct LauncherMenuLayerStyle {
+ #endif
+ } LauncherMenuLayerStyle;
+ 
++#if CONFIG_LAUNCHER_RADIAL
++//! The radial launcher draws every app itself on one layer, so it needs no
++//! MenuLayer, no scroll offset and no glance service. It keeps the same
++//! public API so launcher.c is shared with the stock list launcher.
++typedef struct LauncherMenuLayer {
++  Layer container_layer;
++  Layer dial_layer;
++  PreferredContentSize content_size;
++  AppMenuDataSource *data_source;
++  uint16_t selected_index;
++  bool selection_animations_enabled;
++  AppInstallId app_to_launch_after_next_render;
++} LauncherMenuLayer;
++#else
+ typedef struct LauncherMenuLayer {
+   Layer container_layer;
+   MenuLayer menu_layer;
+@@ -35,6 +49,7 @@ typedef struct LauncherMenuLayer {
+   bool selection_animations_enabled;
+   AppInstallId app_to_launch_after_next_render;
+ } LauncherMenuLayer;
++#endif
+ 
+ typedef struct LauncherMenuLayerSelectionState {
+   int16_t scroll_offset_y;
+diff --git a/src/fw/apps/system/launcher/default/radial_menu_layer.c b/src/fw/apps/system/launcher/default/radial_menu_layer.c
+new file mode 100644
+index 0000000..398fe60
+--- /dev/null
++++ b/src/fw/apps/system/launcher/default/radial_menu_layer.c
+@@ -0,0 +1,352 @@
++/* SPDX-FileCopyrightText: 2026 Core Devices LLC */
++/* SPDX-License-Identifier: Apache-2.0 */
++
++//! Radial launcher: the app list laid out on a clock face.
++//!
++//! The first app sits at the 12 o'clock position, the second at 1 o'clock and
++//! so on clockwise, with Up and Down stepping by one hour position. Every app
++//! keeps a fixed place on the dial rather than one that depends on how far you
++//! have scrolled, and one step is exactly one crown detent.
++//!
++//! It implements the same launcher_menu_layer_* API as the stock list
++//! launcher so launcher.c is shared; the launcher sources are globbed, so
++//! menu_layer.c compiles only when CONFIG_LAUNCHER_RADIAL is off.
++//!
++//! Drawing is flat black on white with no animation: this is meant for a
++//! panel that redraws slowly, where a moving selection costs a refresh.
++
++#include "menu_layer.h"
++
++#include "applib/fonts/fonts.h"
++#include "applib/graphics/graphics.h"
++#include "applib/graphics/gtypes.h"
++#include "applib/graphics/text.h"
++#include "applib/ui/app_window_stack.h"
++#include "applib/ui/window.h"
++#include "process_management/app_manager.h"
++#include "pbl/util/misc.h"
++#include "pbl/util/size.h"
++#include "pbl/util/trig.h"
++#include "shell/system_theme.h"
++#include "system/passert.h"
++
++#if CONFIG_LAUNCHER_RADIAL
++
++//! Hour positions on the dial. More apps than this wrap onto a second turn:
++//! index 12 sits back at 12 o'clock, one ring further in.
++#define RADIAL_SLOTS 12
++
++//! Radii as a percentage of the dial radius, so one set of numbers covers
++//! every display this firmware builds for.
++#define RADIAL_PCT_RING 78
++#define RADIAL_PCT_DOT 11
++#define RADIAL_PCT_DOT_SELECTED 14
++#define RADIAL_PCT_HALO 20
++
++typedef struct {
++  GPoint center;
++  int16_t radius;
++  int16_t ring;
++  int16_t dot;
++  int16_t dot_selected;
++  int16_t halo;
++} RadialDial;
++
++static const LauncherMenuLayerStyle s_styles[NumPreferredContentSizes] = {
++  [PreferredContentSizeSmall] = {
++    .title_font_key = FONT_KEY_GOTHIC_14_BOLD,
++    .subtitle_font_key = FONT_KEY_GOTHIC_14,
++  },
++  [PreferredContentSizeMedium] = {
++    .title_font_key = FONT_KEY_GOTHIC_18_BOLD,
++    .subtitle_font_key = FONT_KEY_GOTHIC_14,
++  },
++  [PreferredContentSizeLarge] = {
++    .title_font_key = FONT_KEY_GOTHIC_24_BOLD,
++    .subtitle_font_key = FONT_KEY_GOTHIC_18,
++  },
++  [PreferredContentSizeExtraLarge] = {
++    .title_font_key = FONT_KEY_GOTHIC_28_BOLD,
++    .subtitle_font_key = FONT_KEY_GOTHIC_24,
++  },
++};
++
++const LauncherMenuLayerStyle *launcher_menu_layer_get_style(void) {
++  return &s_styles[system_theme_get_content_size()];
++}
++
++////////////////////////////
++// Geometry
++
++static RadialDial prv_dial(GRect bounds) {
++  const int16_t span = MIN(bounds.size.w, bounds.size.h);
++  const int16_t r = (int16_t)(span / 2 - 6);
++  return (RadialDial){
++    .center = GPoint(bounds.size.w / 2, bounds.size.h / 2),
++    .radius = r,
++    .ring = (int16_t)(r * RADIAL_PCT_RING / 100),
++    .dot = (int16_t)(r * RADIAL_PCT_DOT / 100),
++    .dot_selected = (int16_t)(r * RADIAL_PCT_DOT_SELECTED / 100),
++    .halo = (int16_t)(r * RADIAL_PCT_HALO / 100),
++  };
++}
++
++static int32_t prv_slot_angle(uint16_t slot) {
++  return (TRIG_MAX_ANGLE * (slot % RADIAL_SLOTS)) / RADIAL_SLOTS;
++}
++
++static GPoint prv_point(GPoint center, int16_t radius, int32_t angle) {
++  return GPoint(center.x + (int16_t)(sin_lookup(angle) * radius / TRIG_MAX_RATIO),
++                center.y - (int16_t)(cos_lookup(angle) * radius / TRIG_MAX_RATIO));
++}
++
++//! Apps past the first twelve sit on an inner ring rather than overlapping the
++//! outer one, so a long list stays readable instead of piling up.
++static int16_t prv_ring_radius(const RadialDial *dial, uint16_t index) {
++  const uint16_t turn = index / RADIAL_SLOTS;
++  return (int16_t)(dial->ring - (turn * (dial->halo * 5 / 2)));
++}
++
++////////////////////////////
++// Drawing
++
++static uint16_t prv_count(LauncherMenuLayer *lml) {
++  return lml->data_source ? app_menu_data_source_get_count(lml->data_source) : 0;
++}
++
++//! Largest to smallest; an app name that fits none of them is ellipsized at
++//! the last rather than wrapped, because wrapping a single long word breaks
++//! it mid-syllable ("Notification-s").
++static const char *const s_label_fonts[] = {
++  FONT_KEY_GOTHIC_18_BOLD,
++  FONT_KEY_GOTHIC_14_BOLD,
++};
++
++static void prv_draw_label(GContext *ctx, const char *text, GRect box) {
++  GFont font = fonts_get_system_font(s_label_fonts[ARRAY_LENGTH(s_label_fonts) - 1]);
++  GSize used = { 0, 0 };
++
++  for (size_t i = 0; i < ARRAY_LENGTH(s_label_fonts); i++) {
++    GFont candidate = fonts_get_system_font(s_label_fonts[i]);
++    const GSize size = app_graphics_text_layout_get_content_size(
++        text, candidate, box, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
++    if (size.w <= box.size.w) {
++      font = candidate;
++      used = size;
++      break;
++    }
++    if (i == ARRAY_LENGTH(s_label_fonts) - 1) {
++      used = size;
++    }
++  }
++
++  box.origin.y += (box.size.h - used.h) / 2;
++  box.size.h = used.h;
++  graphics_draw_text(ctx, text, font, box, GTextOverflowModeTrailingEllipsis,
++                     GTextAlignmentCenter, NULL);
++}
++
++static void prv_dial_layer_update(Layer *layer, GContext *ctx) {
++  // The dial layer is a member of LauncherMenuLayer, so the owner is the
++  // layer's container; the firmware's layer_init takes no data block.
++  LauncherMenuLayer *lml = container_of(layer, LauncherMenuLayer, dial_layer);
++  GRect bounds;
++  layer_get_bounds(layer, &bounds);
++  const RadialDial dial = prv_dial(bounds);
++  const uint16_t count = prv_count(lml);
++
++  graphics_context_set_antialiased(ctx, false);
++  graphics_context_set_fill_color(ctx, GColorWhite);
++  graphics_fill_rect(ctx, &bounds);
++  graphics_context_set_fill_color(ctx, GColorBlack);
++  graphics_context_set_stroke_color(ctx, GColorBlack);
++
++  for (uint16_t i = 0; i < count; i++) {
++    const GPoint p = prv_point(dial.center, prv_ring_radius(&dial, i), prv_slot_angle(i));
++    if (i == lml->selected_index) {
++      graphics_fill_circle(ctx, p, dial.dot_selected);
++      graphics_context_set_stroke_width(ctx, 3);
++      graphics_draw_circle(ctx, p, dial.halo);
++    } else {
++      // Unselected apps are outlines so the selection is the only solid
++      // mass on the dial.
++      graphics_context_set_stroke_width(ctx, 3);
++      graphics_draw_circle(ctx, p, dial.dot);
++    }
++  }
++
++  AppMenuNode *node = (count > 0) ? app_menu_data_source_get_node_at_index(
++                                        lml->data_source, lml->selected_index)
++                                  : NULL;
++  if (!node || !node->name) {
++    return;
++  }
++
++  // Sized so the box's corners clear the inner edge of a diagonal slot's
++  // halo, otherwise the fill below nicks the ring at 1, 2, 4 and 5 o'clock.
++  const int16_t half = (int16_t)(dial.ring - dial.halo - 8);
++  GRect box = GRect(dial.center.x - half, dial.center.y - 22, half * 2, 44);
++  graphics_context_set_fill_color(ctx, GColorWhite);
++  graphics_fill_round_rect(ctx, &box, 6, GCornersAll);
++  graphics_context_set_text_color(ctx, GColorBlack);
++  prv_draw_label(ctx, node->name, box);
++}
++
++////////////////////////////
++// Input
++
++static void prv_step(LauncherMenuLayer *lml, int delta) {
++  const uint16_t count = prv_count(lml);
++  if (count == 0) {
++    return;
++  }
++  lml->selected_index = (uint16_t)((lml->selected_index + count + delta) % count);
++  layer_mark_dirty(&lml->dial_layer);
++}
++
++static void prv_up_click(ClickRecognizerRef recognizer, void *context) {
++  prv_step((LauncherMenuLayer *)context, -1);
++}
++
++static void prv_down_click(ClickRecognizerRef recognizer, void *context) {
++  prv_step((LauncherMenuLayer *)context, +1);
++}
++
++static void prv_select_click(ClickRecognizerRef recognizer, void *context) {
++  LauncherMenuLayer *lml = context;
++  if (prv_count(lml) == 0) {
++    return;
++  }
++  AppMenuNode *node = app_menu_data_source_get_node_at_index(lml->data_source,
++                                                             lml->selected_index);
++  if (!node) {
++    return;
++  }
++  app_manager_put_launch_app_event(&(AppLaunchEventConfig){
++    .id = node->install_id,
++    .common.reason = APP_LAUNCH_USER,
++    .common.button = BUTTON_ID_SELECT,
++  });
++}
++
++static void prv_click_config_provider(void *context) {
++  // Auto-repeat is deliberately slower than a slow panel's refresh: a faster
++  // repeat turns one deliberate press into two steps and overshoots.
++  window_set_click_context(BUTTON_ID_UP, context);
++  window_set_click_context(BUTTON_ID_DOWN, context);
++  window_set_click_context(BUTTON_ID_SELECT, context);
++  window_single_repeating_click_subscribe(BUTTON_ID_UP, 400, prv_up_click);
++  window_single_repeating_click_subscribe(BUTTON_ID_DOWN, 400, prv_down_click);
++  window_single_click_subscribe(BUTTON_ID_SELECT, prv_select_click);
++}
++
++////////////////////////////
++// Public API
++
++void launcher_menu_layer_init(LauncherMenuLayer *lml, AppMenuDataSource *data_source) {
++  PBL_ASSERTN(lml && data_source);
++  *lml = (LauncherMenuLayer){
++    .data_source = data_source,
++    .content_size = system_theme_get_content_size(),
++    .app_to_launch_after_next_render = INSTALL_ID_INVALID,
++  };
++
++  const GRect bounds = GRect(0, 0, DISP_COLS, DISP_ROWS);
++  layer_init(&lml->container_layer, &bounds);
++  layer_init(&lml->dial_layer, &bounds);
++  layer_set_update_proc(&lml->dial_layer, prv_dial_layer_update);
++  layer_add_child(&lml->container_layer, &lml->dial_layer);
++}
++
++Layer *launcher_menu_layer_get_layer(LauncherMenuLayer *lml) {
++  return lml ? &lml->container_layer : NULL;
++}
++
++void launcher_menu_layer_set_click_config_onto_window(LauncherMenuLayer *lml, Window *window) {
++  if (!lml || !window) {
++    return;
++  }
++  window_set_click_config_provider_with_context(window, prv_click_config_provider, lml);
++}
++
++void launcher_menu_layer_reload_data(LauncherMenuLayer *lml) {
++  if (!lml) {
++    return;
++  }
++  const uint16_t count = prv_count(lml);
++  if (count > 0 && lml->selected_index >= count) {
++    lml->selected_index = (uint16_t)(count - 1);
++  }
++  layer_mark_dirty(&lml->dial_layer);
++}
++
++void launcher_menu_layer_update_content_size(LauncherMenuLayer *lml) {
++  if (!lml || lml->content_size == system_theme_get_content_size()) {
++    return;
++  }
++  // Only the centre label's font depends on the content size, so there is
++  // nothing cached to rebuild the way the list launcher has to.
++  lml->content_size = system_theme_get_content_size();
++  layer_mark_dirty(&lml->dial_layer);
++}
++
++void launcher_menu_layer_set_selection_state(LauncherMenuLayer *lml,
++                                             const LauncherMenuLayerSelectionState *new_state) {
++  if (!lml || !lml->data_source || !new_state) {
++    return;
++  }
++  const uint16_t count = prv_count(lml);
++  lml->selected_index = (count > 0 && new_state->row_index < count) ? new_state->row_index : 0;
++  layer_mark_dirty(&lml->dial_layer);
++}
++
++void launcher_menu_layer_get_selection_vertical_range(const LauncherMenuLayer *lml,
++                                                      GRangeVertical *vertical_range_out) {
++  if (!lml || !vertical_range_out) {
++    return;
++  }
++  // The compositor uses this to line a launch transition up with the
++  // selection. The selected app is a dot on the dial, so report the band it
++  // occupies.
++  GRect global;
++  layer_get_global_frame((Layer *)&lml->dial_layer, &global);
++  GRect bounds;
++  layer_get_bounds((Layer *)&lml->dial_layer, &bounds);
++  const RadialDial dial = prv_dial(bounds);
++  const GPoint p = prv_point(dial.center, prv_ring_radius(&dial, lml->selected_index),
++                             prv_slot_angle(lml->selected_index));
++  *vertical_range_out = (GRangeVertical){
++    .origin_y = (int16_t)(global.origin.y + p.y - dial.halo),
++    .size_h = (int16_t)(dial.halo * 2),
++  };
++}
++
++void launcher_menu_layer_get_selection_state(const LauncherMenuLayer *lml,
++                                             LauncherMenuLayerSelectionState *state_out) {
++  if (!lml || !lml->data_source || !state_out) {
++    return;
++  }
++  *state_out = (LauncherMenuLayerSelectionState){
++    .row_index = lml->selected_index,
++    .scroll_offset_y = 0,  // nothing scrolls
++    .content_size = lml->content_size,
++  };
++}
++
++void launcher_menu_layer_set_selection_animations_enabled(LauncherMenuLayer *lml, bool enabled) {
++  if (!lml) {
++    return;
++  }
++  // Kept for API parity: there are no glances to play or rewind.
++  lml->selection_animations_enabled = enabled;
++}
++
++void launcher_menu_layer_deinit(LauncherMenuLayer *lml) {
++  if (!lml) {
++    return;
++  }
++  layer_deinit(&lml->dial_layer);
++  layer_deinit(&lml->container_layer);
++}
++
++#endif  // CONFIG_LAUNCHER_RADIAL
+-- 
+2.54.0 (Apple Git-157)
+
+
+From 1328651181d846aab498f58d3605a4fbfd795e71 Mon Sep 17 00:00:00 2001
+From: Paul Schmitt <paul.schmitt@gmail.com>
+Date: Mon, 21 Sep 2026 16:46:19 -0700
+Subject: [PATCH 2/2] launcher: keep the clock hands under the dial
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The launcher runs in place of the watchface, so the watchface's own hands
+cannot be drawn underneath: its process is gone and there is one app
+framebuffer. compositor_get_app_framebuffer_as_bitmap() serves transitions,
+not a persistent underlay. The launcher therefore draws the time itself
+from rtc_get_time(), which the app glances here already use.
+
+Drawing its own hands is also the better answer: a watchface may be digital
+or a photo, and a ring of apps over an arbitrary background would not be
+readable. Minimal hands are legible over anything.
+
+This needed a layout change, not just a draw call. With the app name in the
+middle, the label had to punch a white hole through the hub to stay
+readable, which left the hands as two disconnected stubs — present, but not
+reading as hands. The name now sits in a band below the dial
+(RADIAL_LABEL_BAND, excluded from the radius so the dial cannot collide
+with it) and the centre belongs to the hands, which get their proper weight
+back at 5 px and 3 px with a visible hub.
+
+Three concentric zones that do not overlap: hands at the centre, apps on
+the ring, the selected app's name in the band.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ .../launcher/default/radial_menu_layer.c      | 53 +++++++++++++++----
+ 1 file changed, 44 insertions(+), 9 deletions(-)
+
+diff --git a/src/fw/apps/system/launcher/default/radial_menu_layer.c b/src/fw/apps/system/launcher/default/radial_menu_layer.c
+index 398fe60..459e419 100644
+--- a/src/fw/apps/system/launcher/default/radial_menu_layer.c
++++ b/src/fw/apps/system/launcher/default/radial_menu_layer.c
+@@ -24,10 +24,12 @@
+ #include "applib/ui/app_window_stack.h"
+ #include "applib/ui/window.h"
+ #include "process_management/app_manager.h"
++#include "pbl/drivers/rtc.h"
+ #include "pbl/util/misc.h"
+ #include "pbl/util/size.h"
+ #include "pbl/util/trig.h"
+ #include "shell/system_theme.h"
++#include "util/time/time.h"
+ #include "system/passert.h"
+ 
+ #if CONFIG_LAUNCHER_RADIAL
+@@ -42,6 +44,14 @@
+ #define RADIAL_PCT_DOT 11
+ #define RADIAL_PCT_DOT_SELECTED 14
+ #define RADIAL_PCT_HALO 20
++#define RADIAL_PCT_HAND_HOUR 42
++#define RADIAL_PCT_HAND_MINUTE 62
++
++//! The app name sits in a band below the dial rather than in the middle.
++//! The centre belongs to the hands: a label there has to punch a hole in
++//! them to stay readable, which leaves the hands as disconnected stubs and
++//! stops the dial reading as a clock at all.
++#define RADIAL_LABEL_BAND 24
+ 
+ typedef struct {
+   GPoint center;
+@@ -50,6 +60,8 @@ typedef struct {
+   int16_t dot;
+   int16_t dot_selected;
+   int16_t halo;
++  int16_t hand_hour;
++  int16_t hand_minute;
+ } RadialDial;
+ 
+ static const LauncherMenuLayerStyle s_styles[NumPreferredContentSizes] = {
+@@ -79,15 +91,18 @@ const LauncherMenuLayerStyle *launcher_menu_layer_get_style(void) {
+ // Geometry
+ 
+ static RadialDial prv_dial(GRect bounds) {
+-  const int16_t span = MIN(bounds.size.w, bounds.size.h);
++  const int16_t usable_h = (int16_t)(bounds.size.h - RADIAL_LABEL_BAND);
++  const int16_t span = MIN(bounds.size.w, usable_h);
+   const int16_t r = (int16_t)(span / 2 - 6);
+   return (RadialDial){
+-    .center = GPoint(bounds.size.w / 2, bounds.size.h / 2),
++    .center = GPoint(bounds.size.w / 2, usable_h / 2),
+     .radius = r,
+     .ring = (int16_t)(r * RADIAL_PCT_RING / 100),
+     .dot = (int16_t)(r * RADIAL_PCT_DOT / 100),
+     .dot_selected = (int16_t)(r * RADIAL_PCT_DOT_SELECTED / 100),
+     .halo = (int16_t)(r * RADIAL_PCT_HALO / 100),
++    .hand_hour = (int16_t)(r * RADIAL_PCT_HAND_HOUR / 100),
++    .hand_minute = (int16_t)(r * RADIAL_PCT_HAND_MINUTE / 100),
+   };
+ }
+ 
+@@ -122,6 +137,28 @@ static const char *const s_label_fonts[] = {
+   FONT_KEY_GOTHIC_14_BOLD,
+ };
+ 
++//! The launcher runs in place of the watchface, so the watchface's own hands
++//! are not available to draw underneath — its process is gone and there is
++//! one app framebuffer. Drawing the time here keeps the clock present, and
++//! keeps the dial reading as a clock face rather than a ring of dots.
++//!
++//! They are drawn first so the apps sit on top of them, and the centre is
++//! left clear for them: see RADIAL_LABEL_BAND.
++static void prv_draw_hands(GContext *ctx, const RadialDial *dial) {
++  struct tm now;
++  const time_t utc = rtc_get_time();
++  localtime_r(&utc, &now);
++
++  const int32_t minute_angle = (TRIG_MAX_ANGLE * now.tm_min) / 60;
++  const int32_t hour_angle = (TRIG_MAX_ANGLE * ((now.tm_hour % 12) * 60 + now.tm_min)) / 720;
++
++  graphics_context_set_stroke_width(ctx, 5);
++  graphics_draw_line(ctx, dial->center, prv_point(dial->center, dial->hand_hour, hour_angle));
++  graphics_context_set_stroke_width(ctx, 3);
++  graphics_draw_line(ctx, dial->center, prv_point(dial->center, dial->hand_minute, minute_angle));
++  graphics_fill_circle(ctx, dial->center, 4);
++}
++
+ static void prv_draw_label(GContext *ctx, const char *text, GRect box) {
+   GFont font = fonts_get_system_font(s_label_fonts[ARRAY_LENGTH(s_label_fonts) - 1]);
+   GSize used = { 0, 0 };
+@@ -161,6 +198,8 @@ static void prv_dial_layer_update(Layer *layer, GContext *ctx) {
+   graphics_context_set_fill_color(ctx, GColorBlack);
+   graphics_context_set_stroke_color(ctx, GColorBlack);
+ 
++  prv_draw_hands(ctx, &dial);
++
+   for (uint16_t i = 0; i < count; i++) {
+     const GPoint p = prv_point(dial.center, prv_ring_radius(&dial, i), prv_slot_angle(i));
+     if (i == lml->selected_index) {
+@@ -182,14 +221,10 @@ static void prv_dial_layer_update(Layer *layer, GContext *ctx) {
+     return;
+   }
+ 
+-  // Sized so the box's corners clear the inner edge of a diagonal slot's
+-  // halo, otherwise the fill below nicks the ring at 1, 2, 4 and 5 o'clock.
+-  const int16_t half = (int16_t)(dial.ring - dial.halo - 8);
+-  GRect box = GRect(dial.center.x - half, dial.center.y - 22, half * 2, 44);
+-  graphics_context_set_fill_color(ctx, GColorWhite);
+-  graphics_fill_round_rect(ctx, &box, 6, GCornersAll);
+   graphics_context_set_text_color(ctx, GColorBlack);
+-  prv_draw_label(ctx, node->name, box);
++  prv_draw_label(ctx, node->name,
++                 GRect(2, bounds.size.h - RADIAL_LABEL_BAND, bounds.size.w - 4,
++                       RADIAL_LABEL_BAND));
+ }
+ 
+ ////////////////////////////
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,10 +1,84 @@
-# pebble-qemu-wasm
+# pebbleos-wasm
 
-Pebble smartwatch emulator running in the browser. QEMU compiled to WebAssembly boots real Pebble firmware and renders the display to an HTML canvas.
+Pebble smartwatch emulator running in the browser, plus an experiment in what
+a Pebble would be if the panel were e-paper and the launcher lived on the
+clock face.
 
-**[Demo: PebbleOS in the browser](https://ericmigi.github.io/pebble-qemu-wasm/)**
+QEMU compiled to WebAssembly boots real PebbleOS firmware and renders the
+display to an HTML canvas. On top of that:
 
-![Pebble in browser](pebble_wasm_first_frame.png)
+- **A radial launcher.** The app list sits at hour positions — the first app
+  at 12 o'clock, the second at 1 o'clock, and so on clockwise — over the
+  watch hands, instead of in a vertical list. It is the *system launcher*,
+  built into firmware, not an app.
+- **An e-ink panel simulation.** Four grey levels on a paper/ink palette,
+  ghosting that decays, a partial-refresh period that drops intermediate
+  frames, and a full-refresh flash on a page turn.
+- **A crown.** No Pebble ever had one; detents are synthesised into discrete
+  Up/Down presses.
+
+![Radial launcher](pebble_wasm_first_frame.png)
+
+## Run it (no build required)
+
+Everything needed is in this repository — no SDK, no toolchain, no firmware
+downloads. You need Python 3 and a recent Chrome, Edge or Firefox.
+
+```sh
+git clone https://github.com/schmittpaul/pebbleos-wasm.git
+cd pebbleos-wasm
+python3 server.py 8080
+```
+
+Then open one of these:
+
+| What | URL |
+|------|-----|
+| Radial launcher on an e-ink panel | <http://localhost:8080/?board=emery&fw=pebbleos-dev&eink=1> |
+| Radial launcher, normal panel | <http://localhost:8080/?board=emery&fw=pebbleos-dev> |
+| Stock PebbleOS, for comparison | <http://localhost:8080/?board=emery> |
+
+The first boot takes **one to two minutes** — it is a full ARM system
+emulator starting real firmware. The serial console at the bottom of the
+page shows `Starting Launcher` when it is up. It lands on the watchface;
+press **Right arrow / Enter** to open the launcher.
+
+`server.py` is required: it sets the COOP/COEP headers the emulator needs
+for `SharedArrayBuffer`. Opening `index.html` as a file will not work.
+
+### Controls
+
+| Key | Action |
+|-----|--------|
+| &larr; / Esc | Back |
+| &uarr; / &darr; | Step around the dial |
+| &rarr; / Enter | Select — opens the launcher, then launches the app |
+| `,` / `.` | One crown detent |
+
+The crown knob beside the screen can also be dragged or scrolled, and the
+**E-ink** checkbox toggles the panel simulation live — flipping it on and
+off is the quickest way to see what the e-ink constraints actually do.
+
+## Where things live
+
+| Path | What |
+|------|------|
+| `index.html` | The emulator shell: display, buttons, e-ink filter, crown |
+| `firmware/pebbleos-dev/` | PebbleOS built with the radial launcher (gzipped) |
+| `firmware/<board>/` | Stock firmware per board |
+| `pebbleos/` | The launcher's source and a patch against upstream PebbleOS |
+| `scripts/boot-firmware.mjs` | Boot a firmware headless and screenshot it |
+| `scripts/dev-app.mjs` | Build and install a Pebble app from source |
+| `apps/radial-eink/` | The original watchapp prototype of the idea |
+
+Rebuilding the firmware is **not** needed to run any of this; see
+`pebbleos/README.md` if you want to change the launcher.
+
+## Upstream
+
+Forked from [ericmigi/pebble-qemu-wasm](https://github.com/ericmigi/pebble-qemu-wasm),
+which is where the QEMU port and the browser shell come from. Firmware is
+built from [coredevices/PebbleOS](https://github.com/coredevices/PebbleOS).
 
 ## How it works
 

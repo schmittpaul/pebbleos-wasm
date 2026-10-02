@@ -8,5 +8,7 @@ node_modules/
 .playwright-mcp/
 htdocs/
 
-# Locally built PebbleOS firmware (35 MB, rebuild with pbl)
-firmware/pebbleos-dev/
+# Locally built PebbleOS firmware: the .gz images are committed so the demo
+# runs from a plain clone (index.html falls back to <name>.gz and gunzips in
+# the browser). The raw .bin are build output — 35 MB and reproducible.
+firmware/pebbleos-dev/*.bin
